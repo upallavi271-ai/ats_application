@@ -37,11 +37,24 @@ router.get('/', requirePermission('candidates', 'read'), async (req, res, next) 
 
 router.post('/', requirePermission('candidates', 'create'), async (req, res, next) => {
   try {
-    const { name, contact, industry, city, owner_user_id } = req.body;
+    const { name, contact, industry, city, owner_user_id,
+            status, agreement_status, gst, tds, active_date } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
+
+    // The form's agreement dropdown uses friendlier words than the column's
+    // CHECK constraint allows, so map them rather than rejecting the save.
+    const AGREEMENT = { 'Pending': 'Pending Signature', 'Signed': 'Signed & Active', 'Draft': 'Draft',
+                        'Declined': 'Declined', 'Expired': 'Expired' };
+    const agreement = AGREEMENT[agreement_status] || (
+      ['Draft','Pending Signature','Signed & Active','Declined','Expired'].includes(agreement_status)
+        ? agreement_status : 'Draft');
+    const st = ['Active','Paused','Archived'].includes(status) ? status : 'Active';
+
     const { rows } = await pool.query(
-      `INSERT INTO clients (name, contact, industry, city, owner_user_id) VALUES ($1,$2,$3,$4,$5) RETURNING client_id`,
-      [name, contact || null, industry || null, city || null, owner_user_id || req.user.userId]
+      `INSERT INTO clients (name, contact, industry, city, owner_user_id, status, agreement_status, gst, tds, active_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING client_id`,
+      [name, contact || null, industry || null, city || null, owner_user_id || req.user.userId,
+       st, agreement, gst || null, tds || null, active_date || null]
     );
     broadcast('client.created', {});
     res.status(201).json(rows[0]);

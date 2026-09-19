@@ -9,11 +9,27 @@ router.get('/', requirePermission('user_role_mgmt', 'read'), async (req, res, ne
   try {
     const { rows } = await pool.query(
       `SELECT u.user_id, u.full_name, u.email, u.is_active, u.department_id, u.team_id,
-              r.role_name, r.role_id
-       FROM users u JOIN roles r ON r.role_id = u.role_id
+              d.department_name, r.role_name, r.role_id
+       FROM users u
+       JOIN roles r ON r.role_id = u.role_id
+       LEFT JOIN departments d ON d.department_id = u.department_id
        ORDER BY u.full_name`
     );
-    res.json(rows);
+
+    // The Users screen reads can_edit off the first row to decide whether to
+    // show "+ Add user" or fall back to view-only. Without it the button is
+    // permanently disabled, so the caller's own update-permission is resolved
+    // here from the same permissions table every other check uses.
+    const { rows: perm } = await pool.query(
+      `SELECT p.can_update
+       FROM permissions p
+       JOIN users u ON u.role_id = p.role_id
+       JOIN modules m ON m.module_id = p.module_id
+       WHERE u.user_id = $1 AND m.module_key = 'user_role_mgmt'`,
+      [req.user.userId]
+    );
+    const canEdit = perm.length ? !!perm[0].can_update : false;
+    res.json(rows.map((r) => ({ ...r, can_edit: canEdit })));
   } catch (err) { next(err); }
 });
 

@@ -2357,7 +2357,7 @@ function connectRealtime(){
     try{
       if(S.role==='Candidate'){ await loadCandidatePortal(); }
       else if(S.role==='Client'||S.role==='Client Viewer'){ await loadClientPortal(); }
-      else { await loadCandidatesFromBackend(); await loadNotificationsFromBackend(); await loadDashboardKpis(); render(); }
+      else { await loadCandidatesFromBackend(); await loadJobsFromBackend(); await loadClientsFromBackend(); await loadNotificationsFromBackend(); await loadDashboardKpis(); render(); }
       if(d.application_ref) toast('Updated: '+d.application_ref+' → '+(d.status||''));
     }catch(e){}
   };
@@ -3617,6 +3617,25 @@ window.confirmDuplicateApplication=function(){
     history:[['Application Received',`Additional application via ${p.source}${job?` for ${job.role} (${job.id})`:''}`,today()],
              ['Department Assigned',job?`Inherited ${p.dept} from requisition ${job.id}`:`${p.dept} confirmed manually`,today()]],
     clientDecision:'Pending',recruiterVerified:false,bdeVerified:false,interview:null,feedback:null,offer:null,joining:null};
+  // LIVE: the extra application must be saved to the database too, or it
+  // exists only in this browser. The server links it to the same person via
+  // person_ref, which is the same dedup rule the warning above is based on.
+  if(BACKEND.online){
+    apiCall('/api/candidates','POST',{
+      full_name:p.n, email:p.email, phone:p.phone, job_title:p.role,
+      job_id: p.jobId||null,
+      department_id: p.jobId?null:(Object.keys(DEPT_ID_TO_NAME).find(k=>DEPT_ID_TO_NAME[k]===p.dept)||null),
+      source:p.source, skills:p.skills,
+      resume_text:p.resumeText, original_resume:p.resumeText,
+      resume_file_name:p.resumeFileName, stage:'Applied'
+    }).then(async()=>{
+      window.__pendingApplication=null;
+      await loadCandidatesFromBackend();
+      closeM();render();
+      toast('Additional application saved to the database for '+p.n);
+    }).catch(e=>workflowError('Could not save: '+e.message));
+    return;
+  }
   S.candidates.push(ensureCandidateShape(cand));
   linkPersonForApplication(cand);
   window.__pendingApplication=null;
@@ -4348,6 +4367,25 @@ function createClient(){
     pastIssues:v('nc_pastissues'), replacementTracking:v('nc_repltrack'),
     internalNotes:v('nc_notes'), legalNote:v('nc_legalnote')
   });
+  // LIVE: persist to the database so every other user sees this client too.
+  // Previously this only pushed into S.clients (this browser's localStorage),
+  // so a client added on one laptop was invisible everywhere else.
+  if(BACKEND.online){
+    apiCall('/api/clients','POST',{
+      name, contact:pmail, industry:v('nc_industry'),
+      city:(document.querySelector('.ncloc-city')||{}).value||'',
+      status:v('nc_status')||'Active',
+      agreement_status:v('nc_agreement')||'Draft',
+      gst:v('nc_gst')||'18%', tds:v('nc_tds')||'10%',
+      active_date:activeDateRaw||null
+    }).then(async()=>{
+      await loadClientsFromBackend();
+      render();
+      toast('Client saved to the database — generating agreement…');
+      generateAgreement(name);
+    }).catch(e=>workflowError('Could not save client: '+e.message));
+    return;
+  }
   save();render();
   toast('Client saved — generating agreement from these details…');
   generateAgreement(name);
