@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: teamlink-ats
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # paste your Neon connection string in Render's dashboard
+      - key: DATABASE_SSL
+        value: "true"        # required by Neon/managed Postgres
+      - key: JWT_SECRET
+        generateValue: true  # Render generates a random secret for you
+      - key: JWT_EXPIRES_IN
+        value: "12h"
+      - key: NODE_ENV
+        value: "production"
+      # CORS_ORIGIN intentionally omitted: the frontend is served from this
+      # same service, so requests are same-origin. Only set it if you later
+      # host the HTML on a different domain.
