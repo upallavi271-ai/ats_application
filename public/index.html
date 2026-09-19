@@ -434,6 +434,12 @@ window.deleteUserRow=function(i){
   if(['Super Admin'].includes(u.role) && S.users.filter(function(x){return x.role==='Super Admin'}).length<=1)
     return toast('Cannot delete the last Super Admin');
   if(!confirm('Delete user "'+u.name+'"?'))return;
+  if(BACKEND.online && u.user_id){
+    apiCall('/api/users/'+u.user_id,'DELETE')
+      .then(async()=>{ await loadUsersFromBackend(); render(); toast('User "'+u.name+'" removed'); })
+      .catch(e=>workflowError(e.message));
+    return;
+  }
   S.users.splice(i,1);
   try{ delete USER_DIRECTORY[(u.email||'').toLowerCase()]; }catch(e){}
   save(); render(); toast('User "'+u.name+'" deleted');
@@ -501,6 +507,12 @@ window.addDepartment=function(){
   var v=((document.getElementById('od_name')||{}).value||'').trim();
   if(!v) return toast('Enter a department name');
   if(S.departments.some(function(d){return d.name.toLowerCase()===v.toLowerCase()})) return toast('That department already exists');
+  if(BACKEND.online){
+    apiCall('/api/org/departments','POST',{name:v})
+      .then(async()=>{ await loadOrgFromBackend(); openOrgSetup(); render(); toast('Department "'+v+'" added'); })
+      .catch(e=>workflowError('Could not add department: '+e.message));
+    return;
+  }
   S.departments.push({id:'DEPT-'+String(S.departments.length+1).padStart(3,'0'),name:v,active:true});
   save(); openOrgSetup(); render(); toast('Department "'+v+'" added — now add its teams');
 };
@@ -520,6 +532,12 @@ window.addTeam=function(){
   var v=((document.getElementById('ot_name')||{}).value||'').trim();
   if(!v) return toast('Enter a team name');
   if(S.teams.some(function(t){return t.department===dept && t.name.toLowerCase()===v.toLowerCase()})) return toast('That team already exists in '+dept);
+  if(BACKEND.online){
+    apiCall('/api/org/teams','POST',{name:v, department_name:dept})
+      .then(async()=>{ await loadOrgFromBackend(); openOrgSetup(); render(); toast('Team "'+v+'" added to '+dept); })
+      .catch(e=>workflowError('Could not add team: '+e.message));
+    return;
+  }
   S.teams.push({id:'TEAM-'+String(S.teams.length+1).padStart(3,'0'),name:v,department:dept,active:true});
   save(); openOrgSetup(); render(); toast('Team "'+v+'" added to '+dept);
 };
@@ -528,6 +546,15 @@ window.removeTeam=function(id){ return deleteTeam(id); };
 // Delete a team. Refused while anyone is assigned to it, so a delete can never
 // silently orphan a user's team field.
 window.deleteTeam=function(id){
+  if(BACKEND.online){
+    const it=(S.teams||[]).find(x=>x.id===id||x.backendId===id);
+    if(it&&it.backendId){
+      apiCall('/api/org/teams/'+it.backendId,'PATCH',{active:false})
+        .then(async()=>{ await loadOrgFromBackend(); openOrgSetup(); render(); toast('Deactivated'); })
+        .catch(e=>workflowError(e.message));
+      return;
+    }
+  }
   if(!requireUserAdmin())return;
   ensureOrgStructure();
   var t=S.teams.filter(function(x){return x.id===id})[0]; if(!t)return;
@@ -542,6 +569,15 @@ window.deleteTeam=function(id){
 // Delete a department. Refused while users or teams still belong to it, so the
 // data cannot be left pointing at something that no longer exists.
 window.deleteDepartment=function(id){
+  if(BACKEND.online){
+    const it=(S.departments||[]).find(x=>x.id===id||x.backendId===id);
+    if(it&&it.backendId){
+      apiCall('/api/org/departments/'+it.backendId,'PATCH',{is_active:false})
+        .then(async()=>{ await loadOrgFromBackend(); openOrgSetup(); render(); toast('Deactivated'); })
+        .catch(e=>workflowError(e.message));
+      return;
+    }
+  }
   if(!requireUserAdmin())return;
   ensureOrgStructure();
   var d=S.departments.filter(function(x){return x.id===id})[0]; if(!d)return;
@@ -873,9 +909,28 @@ window.matchCandidatesToRequirement=function(jobId){
 // Step 1 of the handoff chain: recruiter picks a requirement to match against.
 // ---------------------------------------------------------------------------
 // Step 3: BDE verifies and shares the shortlist with the client.
-window.bulkShareToClient=function(){
+window.bulkShareToClient=async function(){
   const ids=[...document.querySelectorAll('.bde-select:checked')].map(x=>x.value);
   if(!ids.length)return toast('Tick at least one candidate first');
+  // LIVE: sharing with the client must be a server fact — the client portal
+  // reads this stage to decide what it may show them.
+  if(BACKEND.online){
+    let shared=0, blocked=[];
+    for(const id of ids){
+      const c=S.candidates.find(x=>x.id===id);
+      if(!c||!c.backendId){blocked.push(id);continue}
+      if(c.stage!=='With BDE'){blocked.push(c.name+' (not With BDE)');continue}
+      try{
+        await apiCall('/api/applications/'+c.backendId+'/transition','POST',
+          {to_status:'Shared with Client', notes:'BDE shared profile with the client'});
+        shared++;
+      }catch(e){ blocked.push(c.name+' ('+e.message+')'); }
+    }
+    await loadCandidatesFromBackend(); render();
+    if(shared)toast(shared+' candidate'+(shared===1?'':'s')+' shared with the client');
+    if(blocked.length)workflowError('Could not share: '+blocked.join(', '));
+    return;
+  }
   let n=0, blocked=[];
   ids.forEach(id=>{
     const c=ensureCandidateShape(S.candidates.find(x=>x.id===id));
@@ -904,9 +959,37 @@ window.openMatchPicker=function(){
 };
 
 // Step 2: bulk-send the verified shortlist to BDE.
-window.sendSelectedToBDE=function(jobId){
+window.sendSelectedToBDE=async function(jobId){
   const ids=[...document.querySelectorAll('.match-select:checked')].map(x=>x.value);
   if(!ids.length)return toast('Tick at least one candidate first');
+  // LIVE: each move goes through the server state machine so the handoff is
+  // real for the BDE on their own laptop, not just in this browser.
+  if(BACKEND.online){
+    let moved=0, blocked=[];
+    for(const id of ids){
+      const c=S.candidates.find(x=>x.id===id);
+      if(!c||!c.backendId){blocked.push(id);continue}
+      try{
+        if(c.stage==='Applied'){
+          await apiCall('/api/applications/'+c.backendId+'/transition','POST',{to_status:'Resume Screening'});
+          await apiCall('/api/applications/'+c.backendId+'/transition','POST',{to_status:'Shortlisted'});
+          await apiCall('/api/applications/'+c.backendId+'/transition','POST',{to_status:'Recruiter Reviewed'});
+        } else if(c.stage==='Resume Screening'){
+          await apiCall('/api/applications/'+c.backendId+'/transition','POST',{to_status:'Shortlisted'});
+          await apiCall('/api/applications/'+c.backendId+'/transition','POST',{to_status:'Recruiter Reviewed'});
+        } else if(c.stage==='Shortlisted'){
+          await apiCall('/api/applications/'+c.backendId+'/transition','POST',{to_status:'Recruiter Reviewed'});
+        }
+        await apiCall('/api/applications/'+c.backendId+'/transition','POST',
+          {to_status:'With BDE', notes:'Recruiter sent to BDE for requirement '+jobId});
+        moved++;
+      }catch(e){ blocked.push(c.name+' ('+e.message+')'); }
+    }
+    await loadCandidatesFromBackend(); render();
+    if(moved)toast(moved+' candidate'+(moved===1?'':'s')+' sent to BDE');
+    if(blocked.length)workflowError('Could not move: '+blocked.join(', '));
+    return;
+  }
   let verified=0, sent=0, blocked=[];
   ids.forEach(id=>{
     const c=ensureCandidateShape(S.candidates.find(x=>x.id===id));
@@ -2238,12 +2321,23 @@ async function loadClientsFromBackend(){
 
 // Loads every wired module. Modules not yet migrated keep their local data,
 // so the app stays coherent mid-migration.
+window.loadOrgFromBackend = async function(){
+  if(!BACKEND.online) return false;
+  try{
+    const [deps, teams] = await Promise.all([apiCall('/api/org/departments'), apiCall('/api/org/teams')]);
+    S.departments = deps.map(d=>({id:d.department_id, backendId:d.department_id, name:d.department_name, active:d.is_active}));
+    S.teams = teams.map(t=>({id:t.team_id, backendId:t.team_id, name:t.team_name, department:t.department_name||'', active:t.active}));
+    return true;
+  }catch(e){ return false; }
+};
+
 async function loadAllFromBackend(){
   if(!BACKEND.online) return;
   const r = await Promise.all([
     loadCandidatesFromBackend(),
     loadJobsFromBackend(),
-    loadClientsFromBackend()
+    loadClientsFromBackend(),
+    loadOrgFromBackend()
   ]);
   BACKEND.loaded = { candidates:r[0], jobs:r[1], clients:r[2] };
 }
@@ -2891,7 +2985,23 @@ window.callCandidate=function(id){let c=S.candidates.find(x=>x.id===id);if(!c)re
 window.filterDashboardByDept=function(dept){S.dashboardDeptFilter=dept;save();render()}
 window.setDashboardFilter=function(key,val){S.dashboardFilters=S.dashboardFilters||{};S.dashboardFilters[key]=val;save();render()};
 window.clearDashboardFilters=function(){S.dashboardDeptFilter='All Departments';S.dashboardFilters={};save();render()};
-window.collectPayment=function(id){if(!hasFeaturePermission('accountant',3,'edit'))return denyPermission('Payment Collection','Edit');let inv=S.invoices.find(x=>x.id===id);if(!inv)return;inv.status='Paid';save();render();toast('Payment recorded for '+inv.id)}
+window.collectPayment=async function(id){
+  if(!hasFeaturePermission('accountant',3,'edit'))return denyPermission('Payment Collection','Edit');
+  let inv=S.invoices.find(x=>x.id===id);if(!inv)return;
+  // LIVE: record the payment against the invoice in the database, for the
+  // exact balance still due (the server refuses anything above it).
+  if(BACKEND.online && inv.backend){
+    const due = Number(inv.balance)||0;
+    if(due<=0){toast('This invoice is already settled');return}
+    try{
+      await apiCall('/api/invoices/'+inv.id+'/payment','POST',{amount:due,method:'Collected'});
+      await loadInvoicesFromBackend(); render();
+      toast('Payment recorded in the database');
+    }catch(e){ workflowError('Could not record payment: '+e.message); }
+    return;
+  }
+  inv.status='Paid';save();render();toast('Payment recorded for '+inv.id)
+}
 window.viewInvoice=function(id){let inv=S.invoices.find(x=>x.id===id);if(!inv)return;mb.innerHTML=`<div class="mhead"><h2>${esc(inv.id)}</h2><button class="btn secondary" onclick="closeM()">✕</button></div><div class="premium-card" style="padding:14px"><p><b>Client:</b> ${esc(inv.client)}</p><p><b>Base amount:</b> ₹${inv.base.toLocaleString('en-IN')}</p><p><b>GST:</b> ₹${inv.gst.toLocaleString('en-IN')}</p><p><b>TDS:</b> ₹${inv.tds.toLocaleString('en-IN')}</p><p><b>Status:</b> ${badge(inv.status)}</p></div>`;modal.classList.remove('hidden')}
 window.filterClientTab=function(tab,btn){
   document.querySelectorAll('.premium-tabs button').forEach(b=>b.classList.remove('active'));
@@ -4603,6 +4713,12 @@ window.archiveClient=function(clientName){
   c.archiveReason=reason;
   c.statusBeforeArchive=c.status;
   c.status='Archived';
+  if(BACKEND.online && c.backendId){
+    apiCall('/api/clients/'+c.backendId,'PATCH',{status:'Archived'})
+      .then(async()=>{ await loadClientsFromBackend(); closeM(); render(); toast(clientName+' has been archived'); })
+      .catch(e=>workflowError('Could not archive: '+e.message));
+    return;
+  }
   pushAgreementHistory(c,'Client Archived',reason+' — by '+(S.currentUserName||S.role));
   save();
   closeM();
@@ -4624,6 +4740,12 @@ window.deleteClient=function(clientName){
   if(!canManageClients())return denyPermission('Delete client','Delete');
   const idx=S.clients.findIndex(x=>x.name===clientName);
   if(idx===-1)return;
+  if(BACKEND.online && S.clients[idx].backendId){
+    apiCall('/api/clients/'+S.clients[idx].backendId,'DELETE')
+      .then(async()=>{ await loadClientsFromBackend(); closeM(); render(); toast(clientName+' deleted'); })
+      .catch(e=>workflowError(e.message));
+    return;
+  }
   S.clients.splice(idx,1);
   save();
   closeM();
@@ -4682,6 +4804,25 @@ window.importClientSheet=async function(input){
     } else rows=csv(await f.text());
     const g=(r,k)=>{const keys=Object.keys(r);const hit=keys.find(x=>x.trim().toLowerCase()===k.toLowerCase());return hit?String(r[hit]||'').trim():''};
     let added=0;const problems=[];
+    // LIVE: imported clients are written to the database so the whole team
+    // sees them. Each row is reported individually rather than failing silently.
+    if(BACKEND.online){
+      for(let idx=0; idx<rows.length; idx++){
+        const r=rows[idx], line=idx+2;
+        const name=g(r,'Company Name')||g(r,'Company')||g(r,'Client');
+        if(!name){problems.push({line,issue:'No company name — row skipped'});continue}
+        if(S.clients.some(c=>c.name.toLowerCase()===name.toLowerCase())){problems.push({line,issue:`"${name}" already exists — row skipped`});continue}
+        try{
+          await apiCall('/api/clients','POST',{
+            name, contact:g(r,'Primary Mail'), industry:g(r,'Industry'),
+            city:g(r,'City'), status:g(r,'Status')||'Active',
+            gst:'18%', tds:'10%'
+          });
+          added++;
+        }catch(e){ problems.push({line, issue:`"${name}" — ${e.message}`}); }
+      }
+      if(added){ await loadClientsFromBackend(); render(); }
+    } else {
     rows.forEach((r,idx)=>{
       const line=idx+2;
       const name=g(r,'Company Name')||g(r,'Company')||g(r,'Client');
@@ -4698,6 +4839,7 @@ window.importClientSheet=async function(input){
       added++;
     });
     if(added){save();render();}
+    }
     input.value='';
     mb.innerHTML=`<div class="mhead"><h2>Client import — ${esc(f.name)}</h2><button class="btn secondary" onclick="closeM()">✕</button></div>
     
@@ -7592,7 +7734,11 @@ ${(()=>{
     :'<div class="notice ok">All candidates have been followed up today — nothing to escalate.</div>'}
   </div>`})()}
 <div class="compact-actions" style="margin-top:12px"><button class="btn secondary sm" onclick="markAllNotificationsRead()">Mark all read</button><button class="btn secondary sm" onclick="openNotificationPreferences()">Preferences</button></div></div></div><div class="premium-side">${sidePanel()}</div></div></div>`}
-window.markNotificationRead=function(i){S.readNotifications=S.readNotifications||[];if(!S.readNotifications.includes(i))S.readNotifications.push(i);save();render();toast('Marked as read')}
+window.markNotificationRead=function(i){
+  if(BACKEND.online && window.__admin && __admin.notifs && (__admin.notifs.items||[])[i]){
+    markNotifRead(__admin.notifs.items[i].notification_id); return;
+  }
+  S.readNotifications=S.readNotifications||[];if(!S.readNotifications.includes(i))S.readNotifications.push(i);save();render();toast('Marked as read')}
 window.markAllNotificationsRead=function(){S.readNotifications=[0,1,2,3,4];save();render();toast('All notifications marked as read')}
 window.setCandidateInterest=function(id,val){let c=S.candidates.find(x=>x.id===id);if(!c)return;c.candidateInterest=val;save();openCandidateDrawer(id);toast(c.name+': '+val)}
 // Two resumes per candidate. BDE and Client roles see ONLY the recruiter-
@@ -8085,9 +8231,30 @@ window.importCandidateSheet=async function(input){
   input.value='';
 };
 
-window.confirmCandidateImport=function(){
+window.confirmCandidateImport=async function(){
   const list=window.__pendingImport||[];
   if(!list.length){closeM();return}
+  // LIVE: import rows go to the database one by one so every teammate gets
+  // them. Failures are reported per-row rather than silently dropped.
+  if(BACKEND.online){
+    let ok=0, failed=[];
+    for(const r of list){
+      try{
+        await apiCall('/api/candidates','POST',{
+          full_name:r.name, email:r.email, phone:r.phone, job_title:r.role,
+          job_id: r.jobId||null,
+          department_id: r.jobId?null:(Object.keys(DEPT_ID_TO_NAME).find(k=>DEPT_ID_TO_NAME[k]===r.dept)||null),
+          source:r.source, skills:r.skills, stage:'Applied'
+        });
+        ok++;
+      }catch(e){ failed.push(r.name+': '+e.message); }
+    }
+    window.__pendingImport=null;
+    await loadCandidatesFromBackend(); closeM(); render();
+    toast(ok+' candidate'+(ok===1?'':'s')+' imported to the database');
+    if(failed.length)workflowError(failed.length+' row(s) failed — '+failed.slice(0,3).join('; '));
+    return;
+  }
   let n=0;
   list.forEach((r,k)=>{
     const job=r.jobId?S.jobs.find(x=>x.id===r.jobId):null;

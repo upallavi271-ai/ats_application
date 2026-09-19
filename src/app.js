@@ -17,6 +17,7 @@ const portalRoutes = require('./routes/portal');
 const reportRoutes = require('./routes/reports');
 const followupRoutes = require('./routes/followups');
 const files = require('./routes/files');
+const orgRoutes = require('./routes/org');
 const pool = require('./db');
 
 const app = express();
@@ -45,6 +46,7 @@ app.use('/api/invoices', auth, invoiceRoutes);
 app.use('/api/portal', auth, portalRoutes);
 app.use('/api/reports', auth, reportRoutes);
 app.use('/api/followups', auth, followupRoutes);
+app.use('/api/org', auth, orgRoutes);
 
 // Resume/document storage. Mounted here (rather than inside candidates.js)
 // because the frontend uses /api/candidates/:id/files for upload+list and a

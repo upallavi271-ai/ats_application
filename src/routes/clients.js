@@ -108,4 +108,44 @@ router.get('/:id/picture', requirePermission('candidates', 'read'), async (req, 
   } catch (err) { next(err); }
 });
 
+// PATCH /api/clients/:id — status changes (archive/pause/resume) and edits.
+router.patch('/:id', requirePermission('candidates', 'update'), async (req, res, next) => {
+  try {
+    const { status, agreement_status, contact, industry, city, gst, tds } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE clients SET
+         status = COALESCE($1, status),
+         agreement_status = COALESCE($2, agreement_status),
+         contact = COALESCE($3, contact),
+         industry = COALESCE($4, industry),
+         city = COALESCE($5, city),
+         gst = COALESCE($6, gst),
+         tds = COALESCE($7, tds)
+       WHERE client_id = $8 RETURNING client_id, name, status`,
+      [status || null, agreement_status || null, contact || null, industry || null,
+       city || null, gst || null, tds || null, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Client not found' });
+    broadcast('client.updated', {});
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/clients/:id — refuses while requirements still reference it,
+// so a delete can never silently orphan live jobs and candidates.
+router.delete('/:id', requirePermission('candidates', 'delete'), async (req, res, next) => {
+  try {
+    const { rows: jobs } = await pool.query('SELECT count(*)::int AS n FROM jobs WHERE client_id = $1', [req.params.id]);
+    if (jobs[0].n > 0) {
+      return res.status(409).json({
+        error: `This client still has ${jobs[0].n} requirement(s). Archive it instead, or close those requirements first.`,
+      });
+    }
+    const { rows } = await pool.query('DELETE FROM clients WHERE client_id = $1 RETURNING name', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Client not found' });
+    broadcast('client.deleted', {});
+    res.json({ ok: true, name: rows[0].name });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

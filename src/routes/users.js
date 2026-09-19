@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
 const { requirePermission } = require('../middleware/permissions');
+const { broadcast } = require('../realtime');
 
 const router = express.Router();
 
@@ -70,6 +71,33 @@ router.patch('/:id', requirePermission('user_role_mgmt', 'update'), async (req, 
     );
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
     res.json(rows[0]);
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/users/:id — deactivates rather than removing the row, because
+// candidates/jobs/notifications reference user_id; a hard delete would break
+// their history. Also refuses to remove the last active Super Admin.
+router.delete('/:id', requirePermission('user_role_mgmt', 'delete'), async (req, res, next) => {
+  try {
+    const { rows: target } = await pool.query(
+      `SELECT u.user_id, u.full_name, r.role_name FROM users u
+       JOIN roles r ON r.role_id = u.role_id WHERE u.user_id = $1`, [req.params.id]
+    );
+    if (!target.length) return res.status(404).json({ error: 'User not found' });
+
+    if (target[0].role_name === 'Super Admin') {
+      const { rows: c } = await pool.query(
+        `SELECT count(*)::int AS n FROM users u JOIN roles r ON r.role_id = u.role_id
+         WHERE r.role_name = 'Super Admin' AND u.is_active`);
+      if (c[0].n <= 1) return res.status(409).json({ error: 'Cannot remove the last Super Admin' });
+    }
+    if (Number(req.params.id) === req.user.userId) {
+      return res.status(409).json({ error: 'You cannot remove your own account' });
+    }
+
+    await pool.query('UPDATE users SET is_active = FALSE WHERE user_id = $1', [req.params.id]);
+    broadcast('user.updated', {});
+    res.json({ ok: true, name: target[0].full_name });
   } catch (err) { next(err); }
 });
 
